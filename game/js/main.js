@@ -69,6 +69,10 @@ const G = {
   spawnTimer: 0,
   waveState: 'idle',
   upgradeChoices: [],
+  // Upgrades the pilot already owns this run, as { id, level } — the HUD
+  // strip below only renders this list. Recording a pick changes no
+  // mechanic: apply() still does the work; this is the build's memory.
+  ownedUpgrades: [],
   kills: 0,
   shotsFired: 0,
   starfield: new Starfield(W, H, 21),
@@ -200,6 +204,7 @@ function freshRun() {
   G.ebullets = [];
   G.pickups = [];
   G.spawnQueue = [];
+  G.ownedUpgrades = [];
   G.player = makePlayer(W / 2, H / 2 + 120);
   G.stats = { damage: 12, fireRate: 6, projectiles: 1, pierce: 0, crit: 0.05, magnet: 90, dashCooldownMax: 2.2, maxHull: 100 };
   G.time = 0;
@@ -258,6 +263,10 @@ function chooseUpgrade(idx) {
   const up = G.upgradeChoices[idx];
   if (!up) return;
   up.apply(G.stats);
+  // Remember the pick for the HUD strip. Same upgrade twice levels it up.
+  const rec = G.ownedUpgrades.find((o) => o.id === up.id);
+  if (rec) rec.level += 1;
+  else G.ownedUpgrades.push({ id: up.id, level: 1 });
   if (up.id === 'hull') {
     G.player.maxHull = G.stats.maxHull;
     G.player.hull = Math.min(G.player.maxHull, G.player.hull + 25);
@@ -713,6 +722,7 @@ function snapshotWorld() {
     particles: snap(particles.items),
     floaters: snap(floaters.items),
     waves: snap(waves.items),
+    ownedUpgrades: JSON.parse(JSON.stringify(G.ownedUpgrades)),
   };
 }
 
@@ -731,6 +741,7 @@ function restoreWorld(s) {
   particles.items = s.particles;
   floaters.items = s.floaters;
   waves.items = s.waves;
+  G.ownedUpgrades = s.ownedUpgrades || [];
 }
 
 // How photogenic is this exact moment? Enemies, bullets and particles count,
@@ -778,22 +789,40 @@ function stageShot(name, seed) {
   }
 
   // Nudge apart any two live damage numbers close enough to touch, so the
-  // frame never shows a merged blob of digits. A 20px number spans ~20px of
-  // glyph plus a 12px glow, so two of them need ~42px of vertical room to
-  // read as separate; 48px sideways. Repeat until no pair violates, so
-  // chains resolve instead of just moving the collision elsewhere. Staging
-  // only; the live game's own merge logic in fx.js is untouched.
+  // frame never shows a merged blob of digits. A big (30px) number's glyph
+  // reaches 30px above its baseline and its 12px glow reaches further, so a
+  // mixed big/small pair needs more room than two small ones: 56px vertical
+  // when either is big, 42px otherwise. Pairs are moved to need + 2, never
+  // exactly onto the boundary they just passed — 42px apart still reads as
+  // one blob once the glows meet (v3 probe: two pairs sat at exactly 42px).
+  // Numbers are also pushed out of the boss core, where gold on bright
+  // yellow washes out. Repeat until no pair violates, so chains resolve
+  // instead of just moving the collision elsewhere. Staging only; the live
+  // game's own merge logic in fx.js is untouched.
   function declutterFloaters() {
     const items = floaters.items;
-    for (let pass = 0; pass < 4; pass += 1) {
+    if (G.boss) {
+      for (const f of items) {
+        const dx = f.x - G.boss.x;
+        const dy = f.y - G.boss.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 78 && d > 0) {
+          f.x = G.boss.x + (dx / d) * 78;
+          f.y = G.boss.y + (dy / d) * 78;
+        }
+      }
+    }
+    const needFor = (a, b) => (a.big || b.big ? 56 : 42);
+    for (let pass = 0; pass < 6; pass += 1) {
       let moved = false;
       for (let i = 0; i < items.length; i += 1) {
         for (let j = i + 1; j < items.length; j += 1) {
           const a = items[i];
           const b = items[j];
-          if (Math.abs(a.x - b.x) < 48 && Math.abs(a.y - b.y) < 42) {
-            b.y = b.y < a.y ? a.y - 42 : a.y + 42;
-            if (b.y < 110) b.y = a.y + 42;
+          const need = needFor(a, b);
+          if (Math.abs(a.x - b.x) < 48 && Math.abs(a.y - b.y) < need) {
+            b.y = b.y < a.y ? a.y - (need + 2) : a.y + (need + 2);
+            if (b.y < 110) b.y = a.y + (need + 2);
             moved = true;
           }
         }
@@ -812,6 +841,13 @@ function stageShot(name, seed) {
     G.stats.damage = 14;
     G.stats.fireRate = 8;
     G.stats.projectiles = 3;
+    // The build this cover is staged around: two multishot picks (1 + 2 = 3
+    // streams, exact), one damage, one fire rate. The strip renders it.
+    G.ownedUpgrades = [
+      { id: 'multishot', level: 2 },
+      { id: 'damage', level: 1 },
+      { id: 'firerate', level: 1 },
+    ];
     startWave(5);
     // The wave banner ("VOID MAW") would print across the boss in the
     // cover frame: clear it here, the fight itself is unchanged.
@@ -862,6 +898,14 @@ function stageShot(name, seed) {
       particles.burst(G.boss.x - 110, G.boss.y + 70, '#ff2e63', 34, 320, G.rand);
       particles.burst(G.boss.x - 110, G.boss.y + 70, '#ffd60a', 18, 240, G.rand);
       waves.add(G.boss.x - 110, G.boss.y + 70, '#ff2e63');
+      // Second blast on the opposite flank, plus low-centre colour, so the
+      // brightest moment is not one-sided and the dark lower band (y 480-650)
+      // lifts: cyan shockwave right, gold and green bursts low. Same ageing
+      // as the first blast, so all of it reads as one moment.
+      particles.burst(G.boss.x + 140, G.boss.y + 110, '#00e5ff', 22, 280, G.rand);
+      particles.burst(640, 560, '#ffd60a', 16, 240, G.rand);
+      particles.burst(420, 600, '#3ddc84', 12, 200, G.rand);
+      waves.add(G.boss.x + 140, G.boss.y + 110, '#00e5ff');
       for (let k = 0; k < 15; k += 1) {
         particles.update(DT);
         waves.update(DT);
@@ -1369,6 +1413,61 @@ function drawHUD() {
     ctx.font = '800 14px system-ui, sans-serif';
     ctx.fillText(boss.final ? 'VOID MAW PRIME' : 'VOID MAW', W / 2, by + 11);
     bar(bx, by + 16, bw, 10, boss.hp / boss.maxHp, '#ff2e63');
+  }
+  drawOwnedStrip();
+  ctx.restore();
+}
+
+// Owned-upgrade strip (HUD, bottom-left): one small chip per upgrade the
+// pilot already owns — icon in the upgrade's accent colour plus a gold pip
+// per level. Display-only: it renders G.ownedUpgrades and changes nothing.
+// Bottom-left keeps it clear of the boss bar and the centre of the arena;
+// at 30px tall it stays readable when the cover is shrunk to 768x480.
+const UPGRADE_ACCENTS = {
+  damage: '#ffd60a',
+  firerate: '#7df9ff',
+  multishot: '#00e5ff',
+  hull: '#3ddc84',
+  dash: '#b537f2',
+  magnet: '#7ad9ff',
+  pierce: '#ff8a00',
+  crit: '#ff2e63',
+};
+
+function drawOwnedStrip() {
+  const owned = G.ownedUpgrades;
+  if (!owned || owned.length === 0) return;
+  const y = H - 42;
+  const h = 30;
+  let x = 16;
+  ctx.save();
+  ctx.font = '800 13px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  for (const o of owned) {
+    const up = UPGRADES.find((u) => u.id === o.id);
+    if (!up) continue;
+    const accent = UPGRADE_ACCENTS[o.id] || '#7df9ff';
+    const iconW = ctx.measureText(up.icon).width;
+    const pips = Math.min(o.level, 4);
+    const w = 12 + iconW + 8 + pips * 9 + 10;
+    ctx.fillStyle = 'rgba(4,6,20,0.78)';
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = accent;
+    ctx.fillText(up.icon, x + 12, y + h / 2 + 1);
+    ctx.fillStyle = '#ffd60a';
+    for (let k = 0; k < pips; k += 1) {
+      ctx.beginPath();
+      ctx.arc(x + 12 + iconW + 8 + k * 9 + 3, y + h / 2, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    x += w + 8;
+    if (x > W / 2) break; // never let the strip eat the middle of the frame
   }
   ctx.restore();
 }
