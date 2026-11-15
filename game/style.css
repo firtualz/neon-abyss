@@ -1,0 +1,27 @@
+/* LUMENFALL — presentation only. All art is drawn on the canvas. */
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #070312;
+}
+
+#game {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+  background: #070312;
+}
+
+#status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
