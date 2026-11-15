@@ -22,7 +22,7 @@ import {
   updateBoss,
 } from './entities.js';
 import { buildWaveQueue, spawnInterval, spawnPoint, isBossWave, waveClearBonus } from './waves.js';
-import { rollUpgrades } from './upgrades.js';
+import { UPGRADES, rollUpgrades } from './upgrades.js';
 
 export const W = 1280;
 export const H = 720;
@@ -691,7 +691,7 @@ function autopilot(dt) {
 }
 
 // ------------------------------------------------------------ shot staging ----
-// ?shot=title|gameplay|boss|victory&seed=N — play the real game forward with
+// ?shot=title|gameplay|boss|victory|draft&seed=N — play the real game forward with
 // the autopilot and photograph the richest moment: every half second the
 // frame is scored (enemies, bullets and particles in the middle of the arena)
 // and the best-scoring state is kept. Nothing is edited or composited; the
@@ -754,6 +754,54 @@ function stageShot(name, seed) {
   G.rand = rand;
   G.shotMode = true;
   const DT = 1 / 60;
+
+  // Frozen corner dressing for staged shots: enemies and live bursts placed
+  // at the frame corners after the best moment is restored, so no large
+  // empty dark area remains. Shot mode renders once afterwards, so they hold
+  // still — the same renderer draws them, nothing is composited.
+  function dressCorners(wave) {
+    const spots = [
+      ['drone', 108, 168],
+      ['weaver', 1172, 172],
+      ['stinger', 118, 612],
+      ['mine', 1162, 604],
+    ];
+    for (const [type, x, y] of spots) {
+      G.enemies.push(spawnEnemy(type, x, y, wave));
+    }
+    particles.burst(150, 645, '#ff8a00', 16, 220, G.rand);
+    particles.burst(1130, 130, '#00b4ff', 12, 200, G.rand);
+    for (let k = 0; k < 12; k += 1) {
+      particles.update(DT);
+      waves.update(DT);
+    }
+  }
+
+  // Nudge apart any two live damage numbers close enough to touch, so the
+  // frame never shows a merged blob of digits. A 20px number spans ~20px of
+  // glyph plus a 12px glow, so two of them need ~42px of vertical room to
+  // read as separate; 48px sideways. Repeat until no pair violates, so
+  // chains resolve instead of just moving the collision elsewhere. Staging
+  // only; the live game's own merge logic in fx.js is untouched.
+  function declutterFloaters() {
+    const items = floaters.items;
+    for (let pass = 0; pass < 4; pass += 1) {
+      let moved = false;
+      for (let i = 0; i < items.length; i += 1) {
+        for (let j = i + 1; j < items.length; j += 1) {
+          const a = items[i];
+          const b = items[j];
+          if (Math.abs(a.x - b.x) < 48 && Math.abs(a.y - b.y) < 42) {
+            b.y = b.y < a.y ? a.y - 42 : a.y + 42;
+            if (b.y < 110) b.y = a.y + 42;
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
   if (name === 'boss') {
     freshRun();
     G.screen = 'playing';
@@ -820,6 +868,8 @@ function stageShot(name, seed) {
         floaters.update(DT);
       }
     }
+    dressCorners(5);
+    declutterFloaters();
     return;
   }
   if (name === 'victory') {
@@ -885,6 +935,57 @@ function stageShot(name, seed) {
       }
     }
     if (best) restoreWorld(best);
+    dressCorners(6);
+    declutterFloaters();
+    return;
+  }
+  if (name === 'draft') {
+    freshRun();
+    G.screen = 'playing';
+    G.kills = 31;
+    G.score = 3420;
+    G.stats.damage = 16;
+    G.stats.fireRate = 8;
+    G.stats.projectiles = 2;
+    startWave(3);
+    // A live battlefield behind the draft overlay: a mixed pack spread to
+    // all four corners, so the dimmed backdrop still reads as a fight in
+    // progress rather than an empty void.
+    const pack = [
+      ['splitter', 520, 260],
+      ['drone', 180, 180],
+      ['drone', 1100, 180],
+      ['weaver', 700, 170],
+      ['stinger', 180, 560],
+      ['stinger', 1100, 560],
+      ['drone', 420, 480],
+      ['weaver', 900, 420],
+      ['mine', 640, 620],
+      ['drone', 980, 300],
+    ];
+    for (const [type, ex, ey] of pack) {
+      G.enemies.push(spawnEnemy(type, ex, ey, G.wave));
+    }
+    // Play a few seconds so bullets, particles and damage numbers exist
+    // behind the overlay.
+    for (let i = 0; i < 60 * 4 && G.screen === 'playing'; i += 1) {
+      autopilot(DT);
+      step(DT);
+    }
+    // Freeze on the draft screen over the live battlefield. The three cards
+    // are fixed for the photo — the most legible trio (damage, multishot,
+    // crit), all real pool cards; the live game rolls its three with
+    // rollUpgrades instead.
+    G.wave = 3;
+    G.waveState = 'clear';
+    G.score += waveClearBonus(3);
+    G.upgradeChoices = [
+      UPGRADES.find((u) => u.id === 'damage'),
+      UPGRADES.find((u) => u.id === 'multishot'),
+      UPGRADES.find((u) => u.id === 'crit'),
+    ];
+    G.screen = 'upgrade';
+    dressCorners(3);
     return;
   }
   // title (default): a short attract game behind the menu. The world plays
@@ -1346,11 +1447,17 @@ function drawUpgrade() {
   ctx.fillStyle = '#ffffff';
   ctx.font = '900 44px system-ui, sans-serif';
   ctx.fillText('CHOOSE AN UPGRADE', W / 2, 205);
+  const accents = ['#ffd60a', '#00e5ff', '#ff2e63'];
   G.upgradeChoices.forEach((up, i) => {
     const x = 250 + i * 280;
     const y = 250;
     panel(x, y, 240, 260);
-    ctx.fillStyle = '#7df9ff';
+    // One accent colour per card, so the three choices read as distinct at
+    // a glance (the same idea as a level-up screen's coloured cards).
+    const accent = accents[i % accents.length];
+    ctx.fillStyle = accent;
+    ctx.fillRect(x + 14, y + 8, 212, 4);
+    ctx.fillStyle = accent;
     ctx.font = '900 30px system-ui, sans-serif';
     ctx.fillText(up.icon, x + 120, y + 66);
     ctx.fillStyle = '#ffffff';
